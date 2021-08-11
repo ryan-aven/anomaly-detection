@@ -1,0 +1,122 @@
+import pandas as pd
+
+#loading the data
+print("loading data")
+data = pd.read_csv("DATA", index_col='time')
+print("load complete")
+
+xdata = data.iloc[:,0:3]
+xdata['X1']=data['X1']
+xdata['X2']=data['X2']
+xdata['X3']=data['X3']
+...
+xdata['XN']=data['XN']
+
+xdata_subset = xdata.iloc[:50000,:]
+xdata_test = xdata.iloc[10000:12500,:]
+
+#importing relevant libraries
+import os
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+import joblib
+from numpy.random import seed
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras.layers import Input, Dropout, Dense, LSTM, TimeDistributed, RepeatVector
+from tensorflow.keras.models import Model
+from tensorflow.keras import regularizers
+import seaborn as sns
+sns.set(color_codes=True)
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+#normalizing the data
+scaler = MinMaxScaler()
+x_train = scaler.fit_transform(xdata_subset)
+x_test = scaler.transform(xdata_test)
+scaler_filename = "scaler_data"
+joblib.dump(scaler, scaler_filename)
+
+#reshaping the arrays
+x_train = x_train.reshape(x_train.shape[0], 1, x_train.shape[1])
+x_test = x_test.reshape(x_test.shape[0], 1, x_test.shape[1])
+print(x_train.shape)
+print(x_test.shape)
+
+#defining a model
+def autoencoder_model(x):
+    inputs = Input(shape=(x.shape[1], x.shape[2]))
+    L1 = LSTM(16, activation='relu', return_sequences=True,
+              kernel_regularizer=regularizers.l2(0.00))(inputs)
+    L2 = LSTM(4, activation='relu', return_sequences=True)(L1)
+    L3 = LSTM(4, activation = 'relu', return_sequences=True)(L2)
+    L4 = LSTM(16, activation = 'relu', return_sequences=True)(L3)
+    output = TimeDistributed(Dense(x.shape[2]))(L4)
+    model = Model(inputs=inputs, outputs=output)
+    return model
+
+model = autoencoder_model(x_train)
+model.compile(optimizer='adam', loss='mae')
+model.summary()
+
+#fit the model to the data
+nb_epochs = 20
+batch_size = 10
+history = model.fit(x_train, x_train, epochs=nb_epochs, batch_size=batch_size,
+                    validation_split=0.05).history
+
+#plot training losses
+fig, ax = plt.subplots(figsize=(14,6), dpi=80)
+ax.plot(history['loss'], 'b', label='Train', linewidth=2)
+ax.plot(history['val_loss'], 'r', label='Validation', linewidth=2)
+ax.set_title('Model loss', fontsize=16)
+ax.set_ylabel('Loss (mae)')
+ax.set_xlabel('Epoch')
+ax.legend(loc='upper right')
+plt.show()
+
+#plot loss distribution of the training set
+x_pred = model.predict(x_train)
+x_pred = x_pred.reshape(x_pred.shape[0], x_pred.shape[2])
+x_pred = pd.DataFrame(x_pred, columns=xdata_subset.columns)
+x_pred.index = xdata_subset.index
+
+scored = pd.DataFrame(index=xdata_subset.index)
+xtrain = x_train.reshape(x_train.shape[0], x_train.shape[2])
+scored['loss_mae'] = np.mean(np.abs(x_pred-xtrain), axis=1)
+plt.figure(figsize=(16,9), dpi=80)
+plt.title('Loss Distribution', fontsize=16)
+sns.distplot(scored['loss_mae'], bins=20, kde=True, color='blue');
+plt.xlim=([0.0, 0.5])
+
+#fit test set, determine anomaly threshold 
+x_pred_test = model.predict(x_test)
+x_pred_test = x_pred_test.reshape(x_pred_test.shape[0], x_pred_test.shape[2])
+x_pred_test = pd.DataFrame(x_pred_test, columns=xdata_subset.columns)
+x_pred_test.index = xdata_test.index
+
+
+scored_test = pd.DataFrame(index=xdata_test.index)
+xtest = x_test.reshape(x_test.shape[0], x_test.shape[2])
+scored_test['loss_mae'] = np.mean(np.abs(x_pred_test-xtest), axis=1)
+scored_test['threshold'] = .15
+scored_test['anomaly'] = scored_test['loss_mae'] > scored_test['threshold']
+scored_test.head()
+
+#fit training set
+x_pred_train = model.predict(x_train)
+x_pred_train = x_pred_train.reshape(x_pred_train.shape[0], x_pred_train.shape[2])
+x_pred_train = pd.DataFrame(x_pred_train, columns = xdata_subset.columns)
+x_pred_train.index = xdata_subset.index
+
+scored_train = pd.DataFrame(index = xdata_subset.index)
+scored_train['loss_mae'] = np.mean(np.abs(x_pred_train-xtrain), axis=1)
+scored_train['threshold'] = .15
+scored_train['anomaly'] = scored_train['loss_mae'] > scored_train['threshold']
+
+#merging the two datasets together
+scored = pd.concat([scored_train, scored_test])
+
+#visualizing the results over time
+scored.plot(logy=True, figsize=(16,9), ylim=[1e-2, 1e2], color=['blue', 'red'])
